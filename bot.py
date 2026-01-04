@@ -4,7 +4,7 @@ import os
 import sys
 import logging
 
-BOT_TOKEN = os.getenv("8161458476:AAH76ALCfc-zWa3Lwh8nitkjw82i8QJYat8")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     print("BOT_TOKEN missing")
     sys.exit(1)
