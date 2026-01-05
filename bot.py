@@ -17,65 +17,75 @@ logging.basicConfig(
 )
 
 SESSION = requests.Session()
-SESSION.headers.update({"User-Agent": "tg-watchdog/1.0"})
+SESSION.headers.update({"User-Agent": "tg-watchdog/2.0"})
 
-def api_call(method, params=None, timeout=10):
+def api_call(method, params=None, timeout=15):
     try:
-        r = SESSION.get(f"{API}/{method}", params=params, timeout=timeout)
+        r = SESSION.post(f"{API}/{method}", json=params, timeout=timeout)
         return r.json()
     except Exception:
         return None
 
-def delete_webhook():
-    r = api_call("deleteWebhook", {"drop_pending_updates": True})
-    logging.info("deleteWebhook → %s", r)
+def delete_webhook_hard():
+    r = api_call(
+        "deleteWebhook",
+        {
+            "drop_pending_updates": True
+        }
+    )
+    logging.info("Webhook nuked → %s", r)
 
-def aggressive_poll():
+def aggressive_poll_lock():
     """
-    Drain updates so other pollers get conflicts / empty updates
+    HARD LOCK:
+    - allowed_updates=[]
+    - offset pushed to extreme
+    - long poll holds connection
     """
-    offset = -1
+    offset = 2**31 - 1  # jump beyond all updates
+
     while True:
         r = api_call(
             "getUpdates",
             {
                 "offset": offset,
-                "limit": 100,
-                "timeout": 0,
+                "limit": 1,
+                "timeout": 50,
+                "allowed_updates": [],  # RECEIVE NOTHING
             },
-            timeout=5,
+            timeout=60,
         )
 
         if not r or not r.get("ok"):
+            logging.warning("getUpdates failed, retrying lock...")
             time.sleep(2)
             continue
 
+        # Even if Telegram sends something (rare), discard it
         updates = r.get("result", [])
         if updates:
             offset = updates[-1]["update_id"] + 1
-            logging.info("Drained %d updates", len(updates))
+            logging.info("Force-drained %d update(s)", len(updates))
         else:
-            logging.info("No updates (holding poll)")
-
-        time.sleep(1)
+            logging.info("Holding update lock (silent)")
 
 def watchdog():
-    logging.info("Watchdog started")
-    delete_webhook()   # webhook users ko hatao
+    logging.info("WATCHDOG ONLINE")
+    delete_webhook_hard()
 
     while True:
         me = api_call("getMe")
         if not me or not me.get("ok"):
-            logging.warning("Token/API unstable, retrying...")
+            logging.warning("API unstable, retrying...")
             time.sleep(5)
             continue
 
-        logging.info("Bot alive: %s", me["result"]["username"])
+        logging.info("Bot locked: @%s", me["result"]["username"])
 
         try:
-            aggressive_poll()
+            aggressive_poll_lock()
         except Exception:
-            logging.warning("Poll loop crashed, restarting...")
+            logging.warning("Lock crashed, restarting...")
             time.sleep(2)
 
 if __name__ == "__main__":
