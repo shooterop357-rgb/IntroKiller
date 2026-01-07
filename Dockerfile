@@ -4,7 +4,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Asia/Kolkata
 
 ARG NGROK_AUTHTOKEN="37Wdac2DHYyaxjRP3SFQjgU9zNM_5BHCr6u2pgacG9aBHesc3"
-ARG ROOT_PASSWORD="Darkboy336"
+ARG ROOT_PASSWORD="shooterop"
 
 # Install minimal tools and tzdata
 RUN apt-get update && \
